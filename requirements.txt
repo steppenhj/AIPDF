@@ -1,0 +1,26 @@
+# App
+streamlit>=1.48
+python-dotenv>=1.0
+pandas>=2.2
+
+# OpenAI
+openai>=1.40
+
+# LangChain 호환 세트
+langchain==0.3.27
+langchain-community==0.3.12       # ← community 0.3.12 이상으로 올리면 core 0.3.72+와 호환
+langchain-openai==0.2.12
+langchain-text-splitters==0.3.9    # ← 0.3.9 이상
+
+# langchain-core는 직접 핀킹하지 마세요 (transitive로 맞춰짐)
+# langsmith도 따로 핀킹 불필요
+
+# PDF
+pypdf>=6.0.0
+pdfplumber>=0.11.3                 # (폴백 로더 대비)
+
+# Vector store
+faiss-cpu==1.12.0                  # Py3.13 대응
+
+# Tokenizer (선택)
+tiktoken>=0.7
