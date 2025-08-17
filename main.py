@@ -20,6 +20,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from operator import itemgetter # 이 부분을 추가해주세요.
 from langchain_core.messages import HumanMessage, AIMessage
 
 
@@ -370,7 +371,9 @@ def build_chain(retriever):
     ])
     chain = (
         {
-            "context": retriever | _format_docs,
+            # 이 부분이 핵심 수정 사항입니다.
+            # invoke로 들어온 딕셔너리에서 'question' 키의 값만 뽑아서 retriever에 전달합니다.
+            "context": itemgetter("question") | retriever | _format_docs,
             "question": RunnablePassthrough(),
             "chat_history": RunnablePassthrough() # invoke 시점에 chat_history를 전달
         }
