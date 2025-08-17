@@ -1,7 +1,7 @@
-# app.py — PDF 기반 Q&A (강화 RAG, 비용 최적화 + 견고 출력, 대화 기능 추가, 버그 수정)
+# app.py — PDF 기반 Q&A (강화 RAG, 비용 최적화 + 견고 출력, AI 질문 추천 기능 추가)
 import os, re, json, tempfile, hashlib, pathlib
 from typing import List, Tuple
-from operator import itemgetter  # <<<<<<<<<<<<<<< 이 줄이 추가되었습니다.
+from operator import itemgetter
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
@@ -14,7 +14,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 try:
     from langchain_community.document_loaders import PyPDFLoader
 except ModuleNotFoundError:
-    from langchain_community.document_loaders.pdf import PyPDFLoader  # 아주 구버전 대비
+    from langchain_community.document_loaders.pdf import PyPDFLoader
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -30,20 +30,17 @@ from langchain.retrievers.document_compressors import LLMChainExtractor
 # =========================
 # 기본 UI
 # =========================
-st.set_page_config(page_title="PDF QA 박해진 (강화 RAG + 대화)", page_icon="📄", layout="centered")
-st.title("📄 PDF 기반 Q&A (강화 RAG + 대화 기능)")
+st.set_page_config(page_title="PDF QA (AI 질문 추천)", page_icon="💡", layout="centered")
+st.title("💡 PDF 기반 Q&A (AI 질문 추천 기능)")
 
 # =========================
 # API 키
 # =========================
 def get_openai_key():
     key = os.getenv("OPENAI_API_KEY")
-    if key:
-        return key
-    try:
-        return st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        return None
+    if key: return key
+    try: return st.secrets["OPENAI_API_KEY"]
+    except Exception: return None
 
 OPENAI_API_KEY = get_openai_key()
 if not OPENAI_API_KEY:
@@ -51,9 +48,9 @@ if not OPENAI_API_KEY:
     st.stop()
 
 # ===== 모델 설정 (환경변수로 오버라이드 가능) =====
-PRIMARY_MODEL = os.getenv("OPENAI_CHAT_MODEL_PRIMARY", "gpt-4o-mini")  # 메인 생성/추론
-LIGHT_MODEL   = os.getenv("OPENAI_CHAT_MODEL_LIGHT",   "gpt-4o-mini")  # 압축/정제/간단 태스크 (최신 미니 모델로 통일)
-EMBED_MODEL   = os.getenv("OPENAI_EMBED_MODEL",        "text-embedding-3-small")  # 최저가 임베딩
+PRIMARY_MODEL = os.getenv("OPENAI_CHAT_MODEL_PRIMARY", "gpt-4o-mini")
+LIGHT_MODEL   = os.getenv("OPENAI_CHAT_MODEL_LIGHT",   "gpt-4o-mini")
+EMBED_MODEL   = os.getenv("OPENAI_EMBED_MODEL",        "text-embedding-3-small")
 
 # =========================
 # 비용 최적화 기본값 (슬라이더)
@@ -94,9 +91,6 @@ def detect_intent(q: str):
     if has_cons: return "critique"
     return "general"
 
-def looks_like_critique(q: str) -> bool:
-    return detect_intent(q) == "critique"
-
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()[:16]
 
@@ -114,15 +108,12 @@ def safe_json_loads(s: str, allow_empty: bool = False):
         if allow_empty: return {}
         raise ValueError("empty JSON response")
     s = s.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.DOTALL)
+    if s.startswith("```"): s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.DOTALL)
     m = re.search(r"\{[\s\S]*\}", s)
     if m: s = m.group(0)
-    if "'" in s and '"' not in s:
-        s = s.replace("'", '"')
+    if "'" in s and '"' not in s: s = s.replace("'", '"')
     s = re.sub(r"(?m)^\s*//.*$", "", s)
-    try:
-        return json.loads(s)
+    try: return json.loads(s)
     except Exception:
         if allow_empty: return {}
         raise
@@ -135,15 +126,12 @@ def to_text(resp) -> str:
         ak = getattr(resp, "additional_kwargs", {}) or {}
         tcs = ak.get("tool_calls") or []
         if tcs:
-            fn = (tcs[0] or {}).get("function", {})
-            args = fn.get("arguments", "") or ""
+            fn = (tcs[0] or {}).get("function", {}); args = fn.get("arguments", "") or ""
             return str(args).strip()
         fc = ak.get("function_call") or {}
-        if fc:
-            return str(fc.get("arguments", "") or "").strip()
+        if fc: return str(fc.get("arguments", "") or "").strip()
         return ""
-    except Exception:
-        return ""
+    except Exception: return ""
 
 # =========================
 # 인덱스 생성/로딩 (캐시 + 디스크 저장)
@@ -152,93 +140,102 @@ def to_text(resp) -> str:
 def load_or_build_index(pdf_bytes: bytes, chunk_size:int, chunk_overlap:int, api_key:str):
     pdf_hash = sha256_bytes(pdf_bytes)
     folder = save_dir_for(pdf_hash)
-
     if os.path.isdir(folder) and os.path.exists(os.path.join(folder, "index.faiss")):
         embeddings = OpenAIEmbeddings(api_key=api_key, model=EMBED_MODEL)
         vs = FAISS.load_local(folder, embeddings, allow_dangerous_deserialization=True)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(pdf_bytes)
-            path = tmp.name
+            tmp.write(pdf_bytes); path = tmp.name
         docs = PyPDFLoader(path).load()
         splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap, separators=["\n\n", "\n", " ", ""])
         splits = splitter.split_documents(docs)
         embeddings = OpenAIEmbeddings(api_key=api_key, model=EMBED_MODEL)
         vs = FAISS.from_documents(splits, embeddings)
         vs.save_local(folder)
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_bytes)
-        path2 = tmp.name
+        tmp.write(pdf_bytes); path2 = tmp.name
     page_docs = PyPDFLoader(path2).load()
     pages = [(d.metadata.get("page", 0)+1, d.page_content) for d in page_docs]
     return vs, pages
 
 def _format_docs(docs, max_chars=3000):
-    text = "\n\n".join(f"[p.{(d.metadata.get('page',0)+1)}] {d.page_content}" for d in docs)
-    return text[:max_chars]
+    return "\n\n".join(f"[p.{(d.metadata.get('page',0)+1)}] {d.page_content}" for d in docs)[:max_chars]
 
 # =========================
 # LLM 호출 헬퍼
 # =========================
 def llm_chat(max_tokens:int=600, temperature:float=0.2):
     return ChatOpenAI(api_key=OPENAI_API_KEY, model=PRIMARY_MODEL, temperature=temperature, max_tokens=max_tokens)
-
 def llm_light(max_tokens:int=300, temperature:float=0):
     return ChatOpenAI(api_key=OPENAI_API_KEY, model=LIGHT_MODEL, temperature=temperature, max_tokens=max_tokens)
-
 def llm_chat_json(max_tokens:int=700, temperature:float=0):
     def _invoke(msgs):
         try:
-            return ChatOpenAI(
-                api_key=OPENAI_API_KEY, model=PRIMARY_MODEL, temperature=temperature, max_tokens=max_tokens,
-                model_kwargs={"response_format": {"type": "json_object"}},
-            ).invoke(msgs).content
+            return ChatOpenAI(api_key=OPENAI_API_KEY, model=PRIMARY_MODEL, temperature=temperature, max_tokens=max_tokens, model_kwargs={"response_format": {"type": "json_object"}}).invoke(msgs).content
         except Exception:
             hard_sys = '다음 요청에 대해 {"pros":["..."],"cons":["..."]} 형식의 **유효한 JSON 한 개만** 출력하라. 그 외 텍스트/코드블록/설명 금지.'
             return ChatOpenAI(api_key=OPENAI_API_KEY, model=PRIMARY_MODEL, temperature=0, max_tokens=max_tokens).invoke([{"role":"system","content":hard_sys}] + msgs).content
     class _Runner:
-        def invoke(self, msgs):
-            return type("resp", (), {"content": _invoke(msgs)})()
+        def invoke(self, msgs): return type("resp", (), {"content": _invoke(msgs)})()
     return _Runner()
 
 # =========================
-# pros/cons 전용 루트
+# 의도별 답변 생성기
 # =========================
 def answer_pros_cons(question: str, retriever, pages, n: int, use_global: bool, per_page_chars:int, total_chars:int, api_key:str, max_tokens:int=750) -> str:
     if use_global and pages:
-        buf = [f"[p.{p}] {txt[:per_page_chars]}" for p, txt in pages]
-        context = "\n\n".join(buf)[:total_chars]
+        context = "\n\n".join([f"[p.{p}] {txt[:per_page_chars]}" for p, txt in pages])[:total_chars]
     else:
         docs = retriever.get_relevant_documents(question)
-        context = "\n\n".join(f"[p.{d.metadata.get('page',0)+1}] {d.page_content}" for d in docs)[: min(12000, total_chars)]
-    sys = "다음 CONTEXT에 근거해 사용자의 질문(장점과 단점을 각각 N개)을 정확히 따른다. 각 항목의 문장 끝에 반드시 [p.x] 근거를 포함한다. '출력은 {\"pros\":[\"... [p.x]\"],\"cons\":[\"... [p.y]\"]} 형식의 JSON **한 개**만 반환하라."
+        context = "\n\n".join(f"[p.{d.metadata.get('page',0)+1}] {d.page_content}" for d in docs)[:min(12000, total_chars)]
+    sys = "CONTEXT에 근거해 질문(장점과 단점 각각 N개)을 따른다. 각 항목 끝에 [p.x] 근거를 포함한다. '출력은 {\"pros\":[\"...\"],\"cons\":[\"...\"]} 형식의 JSON만 반환하라."
     user = f"N={n}\n질문: {question}\n\nCONTEXT:\n{context}"
-    data = {}
-    out = ""
+    data, out = {}, ""
     for _ in range(2):
         out = to_text(llm_chat_json(max_tokens=max_tokens, temperature=0).invoke([{"role":"system","content":sys},{"role":"user","content":user}]))
         data = safe_json_loads(out, allow_empty=True)
         if data: break
     if not data:
-        out2 = to_text(llm_light(max_tokens=300, temperature=0).invoke([{"role":"system","content":"아래 텍스트에서 필요한 JSON만 추출/수정하여 유효한 JSON 한 개로 반환하라."}, {"role":"user","content":out or ""}]))
+        out2 = to_text(llm_light(max_tokens=300, temperature=0).invoke([{"role":"system","content":"아래 텍스트에서 JSON만 추출/수정하여 유효한 JSON으로 반환하라."}, {"role":"user","content":out or ""}]))
         data = safe_json_loads(out2, allow_empty=True)
     if not isinstance(data, dict) or ("pros" not in data and "cons" not in data):
-        md = to_text(llm_chat(max_tokens=max_tokens).invoke([{"role":"system","content":f"장점 {n}개와 단점 {n}개를 각각 bullet로 생성하라. 각 bullet 끝에 [p.x]를 붙여라. 문서 외 추측 금지."}, {"role":"user","content":f"질문: {question}\n\nCONTEXT:\n{context}"}]))
-        return md
+        return to_text(llm_chat(max_tokens=max_tokens).invoke([{"role":"system","content":f"장점 {n}개와 단점 {n}개를 각각 bullet으로 생성하라. 각 bullet 끝에 [p.x]를 붙여라. 문서 외 추측 금지."}, {"role":"user","content":f"질문: {question}\n\nCONTEXT:\n{context}"}]))
     pros = list(data.get("pros", []))[:n] or ["문서 기반 장점 요약 [p.?]"]
     cons = list(data.get("cons", []))[:n] or ["문서 기반 부족/리스크 요약 [p.?]"]
     return "\n".join(["#### ✅ 잘된 점", *[f"- {p}" for p in pros], "", "#### ⚠️ 부족한 점", *[f"- {c}" for c in cons]])
 
-# =========================
-# 전역 스캔(비판형)
-# =========================
 def critique_answer_global(pages: List[Tuple[int,str]], per_page_chars:int, total_chars:int, api_key:str, question:str, max_tokens:int=700) -> str:
-    buf = [f"[p.{p}] {txt[:per_page_chars]}" for p, txt in pages]
-    context = "\n\n".join(buf)[:total_chars]
-    sys = "다음 CONTEXT에 근거해 **사용자 질문을 정확히 따른다**. 가능하면 bullet로 간결히 서술하고, 각 항목 끝에 [p.x]를 붙인다. 문서 외 추측 금지."
+    context = "\n\n".join([f"[p.{p}] {txt[:per_page_chars]}" for p, txt in pages])[:total_chars]
+    sys = "CONTEXT에 근거해 **사용자 질문을 정확히 따른다**. bullet로 간결히 서술하고, 각 항목 끝에 [p.x]를 붙인다. 문서 외 추측 금지."
     user = f"질문: {question}\n\nCONTEXT:\n{context}"
     return to_text(llm_chat(max_tokens=max_tokens).invoke([{"role":"system","content":sys},{"role":"user","content":user}]))
+
+# =========================
+# >>> NEW: AI 질문 추천 기능 <<<
+# =========================
+@st.cache_data(show_spinner="문서 분석 및 질문 추천 중...")
+def generate_question_suggestions(_pages: List[Tuple[int,str]]) -> List[str]:
+    # 문서의 초반 내용을 간추려 컨텍스트로 사용 (비용 및 속도 최적화)
+    context = "\n".join([f"[p.{p}] {txt[:500]}" for p, txt in _pages[:5]])[:4000]
+    
+    sys = (
+        "You are an AI assistant that helps users understand complex documents. "
+        "Based on the provided context from a document, generate three insightful and distinct questions a user might ask. "
+        "The questions should cover different aspects like overall summary, potential risks, and key takeaways. "
+        "Return the result as a valid JSON list of strings. Example: "
+        '["What is the main purpose of this document?", "What are the key risks identified?", "Summarize the financial projections."]'
+    )
+    user = f"CONTEXT:\n{context}"
+    
+    try:
+        raw = to_text(llm_light(max_tokens=200, temperature=0.1).invoke([{"role":"system","content":sys}, {"role":"user","content":user}]))
+        questions = json.loads(raw)
+        if isinstance(questions, list) and len(questions) > 0:
+            return questions[:3]
+    except Exception:
+        pass # 실패 시 기본 질문으로 폴백
+    
+    return ["이 문서의 핵심 내용을 3가지로 요약해줘", "주요 리스크나 우려되는 점은 무엇이야?", "이 문서가 제시하는 향후 계획은 뭐야?"]
 
 # =========================
 # 상태 초기화
@@ -247,49 +244,37 @@ if "vs" not in st.session_state: st.session_state.vs = None
 if "pages" not in st.session_state: st.session_state.pages = None
 if "messages" not in st.session_state: st.session_state.messages = []
 if "uploaded_name" not in st.session_state: st.session_state.uploaded_name = None
+if "suggested_questions" not in st.session_state: st.session_state.suggested_questions = []
 
 # =========================
 # PDF 업로드 처리
 # =========================
 uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
-if uploaded is not None:
+if uploaded:
     if st.session_state.uploaded_name != uploaded.name:
         with st.spinner("PDF 인덱싱/캐시 준비 중..."):
             vs, pages = load_or_build_index(uploaded.read(), chunk_size, chunk_overlap, OPENAI_API_KEY)
-            st.session_state.vs = vs
-            st.session_state.pages = pages
+            st.session_state.vs, st.session_state.pages = vs, pages
             st.session_state.uploaded_name = uploaded.name
             st.session_state.messages = []
-        st.success(f"'{uploaded.name}' 인덱싱 완료! 이제 질문을 시작할 수 있습니다.")
+            # AI 질문 추천 생성
+            st.session_state.suggested_questions = generate_question_suggestions(pages)
+        st.success(f"'{uploaded.name}' 분석 완료! 아래 추천 질문을 클릭하거나 직접 질문을 입력하세요.")
 else:
-    st.session_state.vs = None
-    st.session_state.pages = None
-    st.session_state.uploaded_name = None
-    st.session_state.messages = []
+    st.session_state.vs, st.session_state.pages, st.session_state.uploaded_name, st.session_state.messages, st.session_state.suggested_questions = None, None, None, [], []
 
 # =========================
-# 대화형 체인 빌더 (대화 기록 포함)
+# 대화형 체인 빌더
 # =========================
 def build_chain(retriever):
-    system = (
-        "너는 업로드된 PDF에 근거해 한국어로 답한다. "
-        "이전 대화 내용을 참고하여, 현재 질문에 가장 적절한 답변을 생성한다. "
-        "항상 **사용자 질문의 의도와 개수 요구를 정확히 따른다**. "
-        "가능하면 bullet을 사용하고, 각 핵심 주장 끝에 [p.페이지] 근거를 붙인다. "
-        "문서와 무관한 추측은 금지한다."
-    )
+    system = "너는 업로드된 PDF에 근거해 한국어로 답한다. 이전 대화 내용을 참고하여, 현재 질문에 가장 적절한 답변을 생성한다. 항상 **사용자 질문의 의도와 개수 요구를 정확히 따른다**. 가능하면 bullet을 사용하고, 각 핵심 주장 끝에 [p.페이지] 근거를 붙인다. 문서와 무관한 추측은 금지한다."
     prompt = ChatPromptTemplate.from_messages([
         ("system", system + "\n\nCONTEXT:\n{context}"),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}")
     ])
     chain = (
-        {
-            "context": itemgetter("question") | retriever | _format_docs,
-            # 아래 두 줄이 수정되었습니다.
-            "question": itemgetter("question"),
-            "chat_history": itemgetter("chat_history")
-        }
+        {"context": itemgetter("question") | retriever | _format_docs, "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
         | prompt
         | llm_chat(max_tokens=max_tokens, temperature=temperature)
         | StrOutputParser()
@@ -297,61 +282,70 @@ def build_chain(retriever):
     return chain
 
 # =========================
+# >>> NEW: 질문 처리 로직 함수화 <<<
+# =========================
+def handle_question(question: str):
+    # 사용자 메시지를 기록하고 표시
+    st.session_state.messages.append({"role": "user", "content": question})
+    
+    # AI 응답 생성 및 표시
+    with st.chat_message("assistant"):
+        with st.spinner("답변 생성 중..."):
+            intent, n = detect_intent(question), extract_count(question, 3)
+            base_retriever = st.session_state.vs.as_retriever(search_type="mmr", search_kwargs={"k": top_k, "fetch_k": fetch_k})
+            retriever = base_retriever
+            if use_compression:
+                compressor = LLMChainExtractor.from_llm(llm_light(max_tokens=300, temperature=0))
+                retriever = ContextualCompressionRetriever(base_retriever=base_retriever, base_compressor=compressor)
+
+            answer = ""
+            if intent == "pros_cons":
+                answer = answer_pros_cons(question, retriever, st.session_state.pages, n, enable_global_critique, global_critique_pages, global_critique_total, OPENAI_API_KEY, max_tokens + 250)
+            elif intent == "critique" and enable_global_critique and st.session_state.pages:
+                answer = critique_answer_global(st.session_state.pages, global_critique_pages, global_critique_total, OPENAI_API_KEY, question, max_tokens + 150)
+            else:
+                chain = build_chain(retriever)
+                chat_history = [HumanMessage(content=msg["content"]) if msg["role"] == "user" else AIMessage(content=msg["content"]) for msg in st.session_state.messages[:-1]]
+                answer = chain.invoke({"question": question, "chat_history": chat_history})
+            
+            if not (answer or "").strip(): answer = "⚠️ 응답이 비어 있습니다. 다시 시도하거나 토큰 한도를 낮춰보세요."
+            st.write(answer)
+            
+            cited_pages = extract_page_citations(answer)
+            if cited_pages and st.session_state.pages:
+                with st.expander(f"🔎 인용된 페이지 스니펫 보기 ({len(cited_pages)}개)"):
+                    page_map = {pg: txt for pg, txt in st.session_state.pages}
+                    for pg in cited_pages:
+                        st.markdown(f"**[p.{pg}]**\n\n{(page_map.get(pg) or '')[:500]}")
+    
+    # AI 메시지를 기록
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# =========================
 # Q&A 및 대화 기록 UI
 # =========================
 if st.session_state.vs:
     st.markdown("---")
+    # 이전 대화 기록 표시
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if question := st.chat_input("PDF 내용에 대해 질문하세요..."):
-        st.session_state.messages.append({"role": "user", "content": question})
-        with st.chat_message("user"):
-            st.markdown(question)
+    # 추천 질문 버튼 표시
+    if st.session_state.suggested_questions and len(st.session_state.messages) == 0:
+        st.markdown("##### 🤔 이런 질문은 어떠세요?")
+        cols = st.columns(len(st.session_state.suggested_questions))
+        for i, question_prompt in enumerate(st.session_state.suggested_questions):
+            with cols[i]:
+                if st.button(question_prompt, key=f"suggestion_{i}", use_container_width=True):
+                    # 버튼 클릭 시 대화 기록을 다시 그리고 질문 처리
+                    handle_question(question_prompt)
+                    st.rerun() # 화면을 새로고침하여 대화 내용 즉시 반영
+    
+    # 사용자 질문 입력
+    if user_input := st.chat_input("PDF 내용에 대해 질문하세요..."):
+        handle_question(user_input)
+        st.rerun()
 
-        with st.chat_message("assistant"):
-            with st.spinner("답변 생성 중..."):
-                intent = detect_intent(question)
-                n = extract_count(question, 3)
-                base_retriever = st.session_state.vs.as_retriever(search_type="mmr", search_kwargs={"k": top_k, "fetch_k": fetch_k})
-                retriever = base_retriever
-                if use_compression:
-                    compressor = LLMChainExtractor.from_llm(llm_light(max_tokens=300, temperature=0))
-                    retriever = ContextualCompressionRetriever(base_retriever=base_retriever, base_compressor=compressor)
-
-                answer = ""
-                if intent == "pros_cons":
-                    answer = answer_pros_cons(question=question, retriever=retriever, pages=st.session_state.pages, n=n, use_global=enable_global_critique, per_page_chars=global_critique_pages, total_chars=global_critique_total, api_key=OPENAI_API_KEY, max_tokens=max_tokens + 250)
-                elif intent == "critique" and enable_global_critique and st.session_state.pages:
-                    answer = critique_answer_global(st.session_state.pages, per_page_chars=global_critique_pages, total_chars=global_critique_total, api_key=OPENAI_API_KEY, question=question, max_tokens=max_tokens + 150)
-                else:
-                    chain = build_chain(retriever)
-                    chat_history = []
-                    for msg in st.session_state.messages[:-1]:
-                        if msg["role"] == "user":
-                            chat_history.append(HumanMessage(content=msg["content"]))
-                        elif msg["role"] == "assistant":
-                            chat_history.append(AIMessage(content=msg["content"]))
-                    
-                    # 일반 질문 invoke 시에는 'question' 키가 있는 딕셔너리를 전달해야 합니다.
-                    answer = chain.invoke({
-                        "question": question,
-                        "chat_history": chat_history
-                    })
-
-                if not (answer or "").strip():
-                    answer = "⚠️ 응답이 비어 있습니다. 다시 시도하거나 토큰 한도를 낮춰보세요."
-                st.write(answer)
-
-                cited_pages = extract_page_citations(answer)
-                if cited_pages and st.session_state.pages:
-                    with st.expander(f"🔎 인용된 페이지 스니펫 보기 ({len(cited_pages)}개)"):
-                        page_map = {pg: txt for pg, txt in st.session_state.pages}
-                        for pg in cited_pages:
-                            snippet = (page_map.get(pg) or "")[:500]
-                            st.markdown(f"**[p.{pg}]**\n\n{snippet}")
-
-        st.session_state.messages.append({"role": "assistant", "content": answer})
 else:
-    st.info("PDF를 업로드하면 질문을 시작할 수 있습니다.")
+    st.info("PDF를 업로드하면 AI가 문서를 분석하고 대화를 시작합니다.")
