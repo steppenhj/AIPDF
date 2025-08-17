@@ -30,7 +30,7 @@ from langchain.retrievers.document_compressors import LLMChainExtractor
 # =========================
 # 기본 UI
 # =========================
-st.set_page_config(page_title="PDF QA (강화 RAG + 대화)", page_icon="📄", layout="centered")
+st.set_page_config(page_title="PDF QA 박해진 (강화 RAG + 대화)", page_icon="📄", layout="centered")
 st.title("📄 PDF 기반 Q&A (강화 RAG + 대화 기능)")
 
 # =========================
@@ -285,9 +285,10 @@ def build_chain(retriever):
     ])
     chain = (
         {
-            "context": itemgetter("question") | retriever | _format_docs, # <<<<<<<<<<<<< 이 부분이 수정되었습니다.
-            "question": RunnablePassthrough(),
-            "chat_history": RunnablePassthrough()
+            "context": itemgetter("question") | retriever | _format_docs,
+            # 아래 두 줄이 수정되었습니다.
+            "question": itemgetter("question"),
+            "chat_history": itemgetter("chat_history")
         }
         | prompt
         | llm_chat(max_tokens=max_tokens, temperature=temperature)
